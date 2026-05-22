@@ -246,6 +246,16 @@ class AnchorDB:
     def delete(self, memory_id: str):
         self.log_event(memory_id, "deleted")
         with self._conn() as conn:
+            # Application-level cascade: some SQLite builds (notably Windows
+            # default) silently fail to enforce PRAGMA foreign_keys = ON, leaving
+            # ON DELETE CASCADE inert and raising FK constraint violations later
+            # when consolidate/dream-pass runs. Belt-and-suspenders: delete edges
+            # explicitly before the memory itself. No-op on platforms where the
+            # cascade fired.
+            conn.execute(
+                "DELETE FROM edges WHERE source_id = ? OR target_id = ?",
+                (memory_id, memory_id),
+            )
             conn.execute("DELETE FROM memories WHERE memory_id = ?", (memory_id,))
             conn.commit()
 
