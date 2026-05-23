@@ -83,6 +83,30 @@ When your AI's substrate changes (model upgrade, weights swap), some internal "b
 - Backfill existing memories: `python concept_link.py --db /path/to/anchor.db --all`.
 - Single-memory mode (used internally by eager link): `python concept_link.py --db /path/to/anchor.db --memory MEMORY_ID`.
 
+### Multi-Intent Search (v1.8.2+)
+
+A single user message can contain several independent topics. Vector
+similarity on the whole message dilutes any one of them — the long tail
+clause gets drowned out by the earlier intents. Result: relevant memories
+don't surface.
+
+`search_multi(queries: list[str])` runs each intent as an independent search
+and merges results dedup'd by `memory_id` (best rank wins). Hebbian
+co-activation fires once across the merged top set, so memories surfaced by
+different intents in the same message form edges with each other.
+
+```python
+# Caller pre-splits the message into intents (using any method — host LLM,
+# small model, sentence splitter, etc.)
+queries = ["tripod outdoor", "HD vs 4K", "Europe trip July"]
+results = mem.search_multi(queries, n_results_per_query=3)
+```
+
+Anchor itself does **not** call an LLM to split intents — the caller
+chooses how. Keeps Anchor LLM-agnostic and zero-cost on this path. The MCP
+tool `search_multi` lets the host AI (Claude / GPT / Gemini / etc.) split
+and pass intents directly, no extra API calls.
+
 ## Quick Start
 
 ```python
@@ -112,6 +136,100 @@ print(stats)
 ```
 chromadb
 sentence-transformers
+
+# Optional, depending on which LLM provider you use:
+anthropic           # Claude
+openai              # OpenAI / DeepSeek / GLM / Ollama (OpenAI-compatible)
+google-generativeai # Gemini
+```
+
+## Model Configuration (v1.9+)
+
+> ⚠️ **Cost Awareness**
+>
+> Anchor's optional features (dream pass, concept linking, multi-intent
+> search with auto-split) call an LLM in the background. The default model
+> is **Haiku** (~$0.001/operation). Anchor tracks every LLM call in
+> `~/.anchor/spend.jsonl` and can refuse to run if today's spend exceeds a
+> cap you set.
+>
+> **Anchor's core features (store, search, hebbian, emotion) work without
+> an LLM.** Only background-pass features need one.
+
+### Recommended Models (cheapest tier per provider)
+
+| Provider          | Recommended model              | Typical dream pass cost   |
+|-------------------|--------------------------------|---------------------------|
+| Anthropic         | `claude-haiku-4-5-20251001`    | ~$0.025                   |
+| OpenAI            | `gpt-5-nano`                   | ~$0.002                   |
+| Google            | `gemini-2.5-flash`             | ~$0.002 (free tier exists)|
+| DeepSeek          | `deepseek-chat`                | varies                    |
+| GLM / Zhipu       | `glm-4.5-flash`                | varies                    |
+| Local (Ollama)    | `qwen2.5:7b` / `llama3.2:3b`   | $0                        |
+
+### Setup
+
+```bash
+# Interactive setup (recommended)
+python -m anchor_init
+
+# Or set the env var manually
+export ANCHOR_LLM='anthropic/claude-haiku-4-5-20251001'
+# or:  ANCHOR_LLM='openai/gpt-5-nano'
+# or:  ANCHOR_LLM='google/gemini-2.5-flash'
+
+# Or edit ~/.anchor/config.yaml directly:
+```
+
+```yaml
+llm:
+  provider: openai     # anthropic | openai | google | openai-compat
+  model: gpt-5-nano
+  # api_key: ...       # optional; defaults to {PROVIDER}_API_KEY env
+  # endpoint: ...      # required for openai-compat (DeepSeek/GLM/Ollama)
+
+safety:
+  max_cost_per_day_usd: 5.0       # raise to disable
+  warn_above_per_pass_usd: 0.10
+```
+
+### Resolution order
+
+When Anchor needs to call an LLM, it resolves the client in this order:
+
+1. Explicit `llm=` argument passed to the function
+2. `ANCHOR_LLM` env var (form: `provider/model`)
+3. `~/.anchor/config.yaml`
+4. **Fallback**: if `ANTHROPIC_API_KEY` is set, use Anthropic Haiku
+5. Raise `ConfigError` with setup instructions
+
+### Spend tracking
+
+Every LLM call writes a line to `~/.anchor/spend.jsonl`. To see today's
+total:
+
+```python
+from anchor_llm import today_spend_usd, session_spend_summary
+print(f"Today: ${today_spend_usd():.4f}")
+print(session_spend_summary())  # totals by date and provider
+```
+
+If `safety.max_cost_per_day_usd` is set, the next LLM call after the cap
+is reached raises `SpendCapExceeded` — Anchor refuses to spend more until
+tomorrow (or you raise the cap).
+
+### Bring your own LLM
+
+Wire in MCP sampling, a local model, or anything else with `CallableLLM`:
+
+```python
+from anchor_llm import CallableLLM
+
+def my_llm(system, user, max_tokens, temperature):
+    return some_other_client.generate(system, user, max_tokens)
+
+llm = CallableLLM(my_llm, name="my-provider/whatever")
+mem.dream_pass(llm=llm)
 ```
 
 ## Design Philosophy

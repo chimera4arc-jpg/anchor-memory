@@ -528,13 +528,18 @@ class AnchorMemory:
         Returns:
             Number of memories split.
         """
+        # v1.9: use anchor_llm. The model= kwarg is honored for backward compat
+        # when ANTHROPIC_API_KEY is set, otherwise fall back to configured default.
         try:
-            import anthropic
-            api_key = os.getenv("ANTHROPIC_API_KEY")
-            if not api_key:
-                return 0
-            client = anthropic.Anthropic(api_key=api_key)
+            from anchor_llm import get_default_llm, AnthropicLLM, ConfigError
         except ImportError:
+            return 0
+        try:
+            if model and os.getenv("ANTHROPIC_API_KEY"):
+                llm_inst = AnthropicLLM(model=model)
+            else:
+                llm_inst = get_default_llm()
+        except ConfigError:
             return 0
 
         system = (
@@ -562,11 +567,12 @@ class AnchorMemory:
                 mem_lines.append(f"[{m['memory_id']}] tag={m.get('tag','')} time={m.get('timestamp','')}\n{snippet}")
 
             try:
-                response = client.messages.create(
-                    model=model, max_tokens=4096, system=system,
-                    messages=[{"role": "user", "content": "\n---\n".join(mem_lines)}],
+                response = llm_inst.call(
+                    system=system,
+                    user="\n---\n".join(mem_lines),
+                    max_tokens=4096,
                 )
-                raw = response.content[0].text.strip()
+                raw = response.text.strip()
                 if raw.startswith("```"):
                     raw = raw.split("\n", 1)[1].rsplit("```", 1)[0].strip()
 

@@ -33,16 +33,33 @@ import os
 from datetime import datetime
 from typing import Optional
 
-import anthropic
+# v1.9: use the LLM abstraction. Direct anthropic import kept as fallback only
+# for backward compatibility with code that hasn't migrated.
+try:
+    from anchor_llm import get_default_llm, LLM
+    _HAS_LLM_LAYER = True
+except ImportError:
+    _HAS_LLM_LAYER = False
 
-DEFAULT_MODEL = os.getenv("ANCHOR_DREAM_MODEL", "claude-sonnet-4-6")
+# Legacy env var — still honored for backward compat. If set AND
+# ANCHOR_LLM is not set, treated as the Anthropic model id.
+DEFAULT_MODEL = os.getenv("ANCHOR_DREAM_MODEL", "claude-haiku-4-5-20251001")
 
 
-def _client():
-    api_key = os.getenv("ANTHROPIC_API_KEY")
-    if not api_key:
-        raise RuntimeError("ANTHROPIC_API_KEY not set")
-    return anthropic.Anthropic(api_key=api_key)
+def _resolve_llm(llm: Optional["LLM"] = None) -> "LLM":
+    """Return the LLM to use. Priority: explicit arg > ANCHOR_LLM env > legacy
+    ANCHOR_DREAM_MODEL + ANTHROPIC_API_KEY > raise."""
+    if not _HAS_LLM_LAYER:
+        raise RuntimeError(
+            "anchor_llm module not found. Reinstall Anchor or pull v1.9+."
+        )
+    if llm is not None:
+        return llm
+    # Legacy path: ANCHOR_DREAM_MODEL set explicitly + ANTHROPIC_API_KEY
+    if os.getenv("ANCHOR_DREAM_MODEL") and os.getenv("ANTHROPIC_API_KEY") and not os.getenv("ANCHOR_LLM"):
+        from anchor_llm import AnthropicLLM
+        return AnthropicLLM(model=DEFAULT_MODEL)
+    return get_default_llm()
 
 
 # ─────────────────────────────  GLOBAL DEDUP  ─────────────────────────────
@@ -96,7 +113,7 @@ def _high_similarity_pairs(ids, embs, threshold=0.92, max_pairs=150):
     return pairs[:max_pairs]
 
 
-def _dedup_decide_batch(client, candidates, model=DEFAULT_MODEL):
+def _dedup_decide_batch(llm, candidates):
     if not candidates:
         return []
     payload = []
@@ -107,14 +124,15 @@ def _dedup_decide_batch(client, candidates, model=DEFAULT_MODEL):
             "b": {"id": c["b_id"], "src": c["b_src"], "entity": c["b_ent"], "text": c["b_text"][:600]},
         })
     try:
-        resp = client.messages.create(
-            model=model, max_tokens=4096, system=DEDUP_SYSTEM,
-            messages=[{"role": "user", "content": json.dumps(payload, ensure_ascii=False)}],
+        resp = llm.call(
+            system=DEDUP_SYSTEM,
+            user=json.dumps(payload, ensure_ascii=False),
+            max_tokens=4096,
         )
     except Exception as e:
         print(f"[dream_extras] dedup LLM error: {e}")
         return []
-    raw = resp.content[0].text.strip()
+    raw = resp.text.strip()
     if raw.startswith("```"):
         raw = raw.split("\n", 1)[1].rsplit("```", 1)[0].strip()
     try:
@@ -127,8 +145,14 @@ def _dedup_decide_batch(client, candidates, model=DEFAULT_MODEL):
 def run_global_dedup(mem, threshold: float = 0.92, max_pairs: int = 100,
                       batch: int = 10, dry_run: bool = False,
                       audit_dir: str = "./anchor_audit",
-                      model: Optional[str] = None) -> dict:
-    """Cross-batch global dedup. Returns counts dict."""
+                      model: Optional[str] = None,
+                      llm: Optional["LLM"] = None) -> dict:
+    """Cross-batch global dedup. Returns counts dict.
+
+    Args:
+        llm: Optional LLM instance. If None, resolved via anchor_llm.get_default_llm().
+        model: DEPRECATED — kept for backward compat. Ignored if `llm` is passed.
+    """
     print(f"[dream_extras] global_dedup start (threshold={threshold}, max_pairs={max_pairs})")
     ids, embs, docs, metas = _all_embeddings(mem)
     print(f"[dream_extras]   {len(ids)} memories scanned")
@@ -152,12 +176,13 @@ def run_global_dedup(mem, threshold: float = 0.92, max_pairs: int = 100,
             "b_id": ids[j], "b_text": docs[j] or "", "b_src": s_j, "b_ent": e_j,
         })
 
-    cl = _client()
+    resolved_llm = _resolve_llm(llm)
+    print(f"[dream_extras]   using {resolved_llm.provider}/{resolved_llm.model}")
     merged = kept = skipped = 0
     decisions_log = []
     for start in range(0, len(candidates), batch):
         chunk = candidates[start:start + batch]
-        decisions = _dedup_decide_batch(cl, chunk, model=model or DEFAULT_MODEL)
+        decisions = _dedup_decide_batch(resolved_llm, chunk)
         for d in decisions:
             decisions_log.append(d)
             if d.get("decision") in ("merge_into_a", "merge_into_b"):
@@ -210,7 +235,7 @@ FACT_CHECK_SYSTEM = (
 )
 
 
-def _fact_check_group(client, mems, model=DEFAULT_MODEL):
+def _fact_check_group(llm, mems):
     if len(mems) < 2:
         return []
     payload = "\n---\n".join(
@@ -218,14 +243,11 @@ def _fact_check_group(client, mems, model=DEFAULT_MODEL):
         for m in mems
     )
     try:
-        resp = client.messages.create(
-            model=model, max_tokens=2048, system=FACT_CHECK_SYSTEM,
-            messages=[{"role": "user", "content": payload}],
-        )
+        resp = llm.call(system=FACT_CHECK_SYSTEM, user=payload, max_tokens=2048)
     except Exception as e:
         print(f"[dream_extras] fact-check LLM error: {e}")
         return []
-    raw = resp.content[0].text.strip()
+    raw = resp.text.strip()
     if raw.startswith("```"):
         raw = raw.split("\n", 1)[1].rsplit("```", 1)[0].strip()
     try:
@@ -237,7 +259,8 @@ def _fact_check_group(client, mems, model=DEFAULT_MODEL):
 
 def run_fact_check(mem, group_threshold: float = 0.65, max_groups: int = 40,
                    audit_dir: str = "./anchor_audit",
-                   model: Optional[str] = None) -> dict:
+                   model: Optional[str] = None,
+                   llm: Optional["LLM"] = None) -> dict:
     """Cluster related memories, ask LLM to flag contradictions per cluster.
     Writes findings as Markdown for human review (no auto-resolve)."""
     print(f"[dream_extras] fact_check start (group_threshold={group_threshold})")
@@ -271,7 +294,8 @@ def run_fact_check(mem, group_threshold: float = 0.65, max_groups: int = 40,
 
     print(f"[dream_extras]   {len(groups)} candidate groups")
 
-    cl = _client()
+    resolved_llm = _resolve_llm(llm)
+    print(f"[dream_extras]   using {resolved_llm.provider}/{resolved_llm.model}")
     findings = []
     for idxs in groups:
         mems = [{
@@ -279,7 +303,7 @@ def run_fact_check(mem, group_threshold: float = 0.65, max_groups: int = 40,
             "tag": (metas[j] or {}).get("tag", "?"),
             "timestamp": (metas[j] or {}).get("timestamp", "?"),
         } for j in idxs]
-        result = _fact_check_group(cl, mems, model=model or DEFAULT_MODEL)
+        result = _fact_check_group(resolved_llm, mems)
         if result:
             findings.extend(result)
 

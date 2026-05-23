@@ -45,8 +45,31 @@ import re
 import sys
 from anchor_db import AnchorDB
 
-CONCEPT_MODEL = "claude-sonnet-4-6"
+# Legacy model ids. v1.9+: use anchor_llm.get_default_llm() instead.
+# These are kept so old call sites that pass model= still work, but the new
+# unified path is to pass llm= (an LLM instance) or rely on the default.
+CONCEPT_MODEL = "claude-haiku-4-5-20251001"  # was sonnet — Haiku is cheap enough
 CONFIRM_MODEL = "claude-haiku-4-5-20251001"
+
+try:
+    from anchor_llm import get_default_llm, LLM, AnthropicLLM
+    _HAS_LLM_LAYER = True
+except ImportError:
+    _HAS_LLM_LAYER = False
+
+
+def _resolve_llm(llm=None, legacy_model: str = None):
+    """Resolve to an LLM instance. Backward-compatible with model= callers."""
+    if llm is not None:
+        return llm
+    if not _HAS_LLM_LAYER:
+        raise RuntimeError("anchor_llm not found. Reinstall Anchor v1.9+.")
+    # Backward compat: if a caller passed a model string AND Anthropic key is
+    # available, honor it. Otherwise fall back to env/config default.
+    import os
+    if legacy_model and os.getenv("ANTHROPIC_API_KEY"):
+        return AnthropicLLM(model=legacy_model)
+    return get_default_llm()
 CONCEPT_OVERLAP_THRESHOLD = 4   # v1.7.1: raised from 2 after over-connect issue
 MAX_EDGES_PER_MEMORY = 5        # v1.7.1: cap eager-link edges per write
 COMMON_ATOM_BLACKLIST = {
@@ -78,7 +101,11 @@ Output JSON only: {"tags": ["tag1", "tag2", ...]}
 
 
 def _client():
-    """Default Anthropic client. Replace this if using another provider."""
+    """DEPRECATED in v1.9. Use _resolve_llm() instead.
+
+    Kept as a backward-compat shim for any external code patching this.
+    Returns a raw Anthropic client only if you still have ANTHROPIC_API_KEY set.
+    """
     import anthropic
     return anthropic.Anthropic()
 
@@ -119,19 +146,24 @@ def _tag_atoms(tags: list) -> set:
     return atoms
 
 
-def extract_concepts(memories: list, cache: dict, model: str = CONCEPT_MODEL) -> dict:
+def extract_concepts(memories: list, cache: dict, model: str = CONCEPT_MODEL,
+                     llm=None) -> dict:
     """For each memory, return list of concept tags. Cached by memory_id.
 
     memories: list of dicts with 'memory_id' and 'text' (or 'snippet').
     Returns: dict memory_id -> list of tags.
+
+    Args:
+        llm: LLM instance (v1.9+ preferred path).
+        model: DEPRECATED — used only when llm=None and Anthropic key present.
     """
     todo = [m for m in memories if m['memory_id'] not in cache]
     if not todo:
         return {m['memory_id']: cache[m['memory_id']] for m in memories}
 
-    client = _client()
+    llm_inst = _resolve_llm(llm, legacy_model=model)
     print(f"[ConceptLink] Extracting concepts for {len(todo)} new memories "
-          f"(cache hit: {len(memories) - len(todo)})")
+          f"(cache hit: {len(memories) - len(todo)}) via {llm_inst.provider}/{llm_inst.model}")
 
     for i in range(0, len(todo), BATCH_SIZE):
         batch = todo[i:i + BATCH_SIZE]
@@ -146,13 +178,8 @@ def extract_concepts(memories: list, cache: dict, model: str = CONCEPT_MODEL) ->
                   + '\n\nOutput format: [{"id": "...", "tags": [...]}, ...]')
 
         try:
-            resp = client.messages.create(
-                model=model,
-                max_tokens=1500,
-                system=CONCEPT_SYSTEM,
-                messages=[{"role": "user", "content": prompt}],
-            )
-            text = resp.content[0].text.strip()
+            resp = llm_inst.call(system=CONCEPT_SYSTEM, user=prompt, max_tokens=1500)
+            text = resp.text.strip()
             text = re.sub(r'^```(?:json)?\s*', '', text)
             text = re.sub(r'\s*```$', '', text)
             data = json.loads(text)
@@ -185,12 +212,17 @@ def concept_match(concepts: dict, threshold: int = CONCEPT_OVERLAP_THRESHOLD) ->
 
 
 def confirm_pairs(candidates: list, memories_dict: dict,
-                  model: str = CONFIRM_MODEL) -> list:
-    """Confirm semantic relatedness with the fine worker."""
+                  model: str = CONFIRM_MODEL, llm=None) -> list:
+    """Confirm semantic relatedness with the fine worker.
+
+    Args:
+        llm: LLM instance (v1.9+ preferred path).
+        model: DEPRECATED — used only when llm=None and Anthropic key present.
+    """
     if not candidates:
         return []
 
-    client = _client()
+    llm_inst = _resolve_llm(llm, legacy_model=model)
     confirmed = []
 
     for batch_start in range(0, len(candidates), 10):
@@ -212,12 +244,8 @@ def confirm_pairs(candidates: list, memories_dict: dict,
                   + "\n\n".join(prompt_parts))
 
         try:
-            resp = client.messages.create(
-                model=model,
-                max_tokens=200,
-                messages=[{"role": "user", "content": prompt}],
-            )
-            text = resp.content[0].text.strip()
+            resp = llm_inst.call(system="", user=prompt, max_tokens=200)
+            text = resp.text.strip()
             if text == "NONE":
                 continue
             for n in re.findall(r'\d+', text):

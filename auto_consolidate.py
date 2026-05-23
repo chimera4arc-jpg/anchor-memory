@@ -85,20 +85,26 @@ def _coarse_match(memories):
     return candidates
 
 
-def _llm_confirm(candidates, memories_dict):
-    """Confirm semantic relatedness using LLM. Requires API key."""
+def _llm_confirm(candidates, memories_dict, llm=None):
+    """Confirm semantic relatedness using LLM. v1.9: uses anchor_llm layer.
+
+    Args:
+        llm: LLM instance (v1.9+ preferred path). Falls back to anchor_llm
+             default (typically Haiku with ANTHROPIC_API_KEY in env).
+    """
     if not candidates:
         return []
 
     try:
-        import anthropic
-        api_key = os.getenv("ANTHROPIC_API_KEY")
-        if not api_key:
-            print("[Consolidate] No ANTHROPIC_API_KEY. Skipping LLM confirmation, using all coarse matches.")
-            return candidates
-        client = anthropic.Anthropic(api_key=api_key)
+        from anchor_llm import get_default_llm, ConfigError
     except ImportError:
-        print("[Consolidate] anthropic package not installed. Using all coarse matches.")
+        print("[Consolidate] anchor_llm not available. Using all coarse matches.")
+        return candidates
+
+    try:
+        llm_inst = llm or get_default_llm()
+    except ConfigError as e:
+        print(f"[Consolidate] {e}\n[Consolidate] Skipping LLM confirmation, using all coarse matches.")
         return candidates
 
     confirmed = []
@@ -115,11 +121,8 @@ def _llm_confirm(candidates, memories_dict):
                   "Output only YES pair numbers, comma-separated. If none, output NONE.\n\n"
                   + "\n\n".join(prompt_parts))
         try:
-            response = client.messages.create(
-                model=CONFIRM_MODEL, max_tokens=200,
-                messages=[{"role": "user", "content": prompt}],
-            )
-            text = response.content[0].text.strip()
+            resp = llm_inst.call(system="", user=prompt, max_tokens=200)
+            text = resp.text.strip()
             if text == "NONE":
                 continue
             nums = re.findall(r'\d+', text)
