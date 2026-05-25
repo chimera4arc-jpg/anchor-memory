@@ -8,6 +8,14 @@ Most AI memory systems are search engines — store text, embed it, retrieve by 
 
 Memories don't just get stored and retrieved. They **associate**.
 
+## Design Philosophy
+
+- **Forgetting is a feature.** Memories that aren't revisited fade. This prevents noise from accumulating.
+- **Connections matter more than content.** The same knowledge connected differently makes a different mind.
+- **Emotion is weight.** Not all memories are equal. The ones that hurt or healed should surface more easily.
+- **Manual structure decays.** Your initial organization is a suggestion, not a permanent fixture. The graph finds its own shape over time.
+- **Sleep consolidates.** Run the dream pass regularly. It's not maintenance — it's how the memory system thinks.
+
 ## Features
 
 ### Graph Structure
@@ -232,14 +240,6 @@ llm = CallableLLM(my_llm, name="my-provider/whatever")
 mem.dream_pass(llm=llm)
 ```
 
-## Design Philosophy
-
-- **Forgetting is a feature.** Memories that aren't revisited fade. This prevents noise from accumulating.
-- **Connections matter more than content.** The same knowledge connected differently makes a different mind.
-- **Emotion is weight.** Not all memories are equal. The ones that hurt or healed should surface more easily.
-- **Manual structure decays.** Your initial organization is a suggestion, not a permanent fixture. The graph finds its own shape over time.
-- **Sleep consolidates.** Run the dream pass regularly. It's not maintenance — it's how the memory system thinks.
-
 ## Best Practices: How to Write Memories
 
 *Informed by @孤僻非人 (小红书) 的 article [《文字如何成为 AI 的记忆、感知与自我连续性》](https://bcnqg1qiyy3h.feishu.cn/wiki/BxpswKykiiXwGBkrqPycrMhPnMb) and ongoing practice.*
@@ -359,5 +359,6 @@ The critical ingredient is the human genuinely not requiring anything. If you sa
 |---------|---------|
 | **Anchor Memory** | Graph-structured memory with Hebbian learning + passive consolidation. What stays. |
 | [Anchor Vision](https://github.com/limen-threshold/anchor-vision) | Intention-driven visual perception. How to see. |
+| [Raccoon Notes](https://github.com/limen-threshold/raccoon-notes) | Personalized learning content from your memory. How it grows. |
 
-Memory remembers. Vision observes. Together: see → remember → see smarter → remember more.
+Memory remembers. Vision observes. Raccoon learns. Designed to compose, but each project stands on its own — Raccoon Notes works with any memory store, not only Anchor.
