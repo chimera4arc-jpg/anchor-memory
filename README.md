@@ -167,6 +167,61 @@ openai              # OpenAI / DeepSeek / GLM / Ollama (OpenAI-compatible)
 google-generativeai # Gemini
 ```
 
+## Use as an MCP Server
+
+Anchor ships an MCP server (`anchor_mcp.py`) so your AI can call Anchor directly as tools — no host-side glue code required.
+
+### Claude Code
+
+Add to `~/.claude/settings.json` (or a project's `.mcp.json`):
+
+```json
+{
+  "mcpServers": {
+    "anchor-memory": {
+      "command": "python3",
+      "args": ["/absolute/path/to/anchor_mcp.py", "--db-path", "/absolute/path/to/my_memory"]
+    }
+  }
+}
+```
+
+Restart Claude Code. Your AI now has these tools:
+
+- `store_memory` — store a memory
+- `search_memory` — search (with Hebbian learning and associative recall)
+- `connect_memories` — manually connect two memories
+- `get_neighbors` — inspect a memory's edges
+- `delete_memory` — delete
+- `dream_pass` — run consolidation (daily)
+- `set_emotion` / `set_tier` — tune a memory after the fact
+- `pin_memory` / `unpin_memory` — pin memories that should always surface on `wakeup()`
+- `wakeup` — curated cold-start subset (pinned + high-emotion + 1–2 random + unread comments)
+- `mark_comments_read` — clear the unread queue after processing
+- `comment` — leave a comment under a memory (turns memories into dialogue spaces)
+- `graph_stats` — graph-level health
+
+### LobeHub / SillyTavern / other MCP hosts
+
+Same JSON config under whichever MCP block the host exposes. SillyTavern needs the MCP Bridge plugin.
+
+### Use alongside other memory systems
+
+Anchor doesn't replace your existing memory stack. It adds a graph layer next to it.
+
+- **Anchor + Ombre Brain** — OB handles time decay + emotion triggers; Anchor handles graph + association.
+- **Anchor + Fiam** — Fiam detects topic drift; Anchor handles storage + graph.
+- **Anchor + anything** — if you can export memory text, you can import it and let Anchor build a graph on top.
+
+### Where the data lives
+
+Everything is under your `db_path` directory:
+
+- `chroma/` — ChromaDB vector index
+- `memories.db` — SQLite (text, edges, emotion scores, tiers)
+
+Backups are `cp -r`. Migration is `mv`.
+
 ## Model Configuration (v1.9+)
 
 > ⚠️ **Cost Awareness**
@@ -376,6 +431,10 @@ Cross-window pattern:
 3. New window: process them, then `mark_comments_read([...])`
 
 This feature was suggested by Veille & 吱吱 based on their single-system architecture where memory is the only persistent shared space. If your setup is similar, use it. If you have richer infrastructure, you probably don't need it.
+
+## Release notes
+
+Per-version notes live in [`docs/release-notes/`](docs/release-notes/). Most recent: [v1.9.1](docs/release-notes/v1.9.1.md).
 
 ## Origin
 
