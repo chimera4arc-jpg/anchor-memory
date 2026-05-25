@@ -567,10 +567,13 @@ class AnchorMemory:
                 mem_lines.append(f"[{m['memory_id']}] tag={m.get('tag','')} time={m.get('timestamp','')}\n{snippet}")
 
             try:
+                # 1h TTL: split_bundled walks the entire memory store; cache
+                # the split-rules system prompt across the whole pass.
                 response = llm_inst.call(
                     system=system,
                     user="\n---\n".join(mem_lines),
                     max_tokens=4096,
+                    cache_ttl="1h",
                 )
                 raw = response.text.strip()
                 if raw.startswith("```"):

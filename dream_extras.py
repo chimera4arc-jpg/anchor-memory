@@ -124,10 +124,13 @@ def _dedup_decide_batch(llm, candidates):
             "b": {"id": c["b_id"], "src": c["b_src"], "entity": c["b_ent"], "text": c["b_text"][:600]},
         })
     try:
+        # 1h TTL: global dedup batches all run within one dream pass,
+        # often >5 min between first and last call.
         resp = llm.call(
             system=DEDUP_SYSTEM,
             user=json.dumps(payload, ensure_ascii=False),
             max_tokens=4096,
+            cache_ttl="1h",
         )
     except Exception as e:
         print(f"[dream_extras] dedup LLM error: {e}")
@@ -243,7 +246,8 @@ def _fact_check_group(llm, mems):
         for m in mems
     )
     try:
-        resp = llm.call(system=FACT_CHECK_SYSTEM, user=payload, max_tokens=2048)
+        resp = llm.call(system=FACT_CHECK_SYSTEM, user=payload,
+                        max_tokens=2048, cache_ttl="1h")
     except Exception as e:
         print(f"[dream_extras] fact-check LLM error: {e}")
         return []

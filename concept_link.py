@@ -178,7 +178,10 @@ def extract_concepts(memories: list, cache: dict, model: str = CONCEPT_MODEL,
                   + '\n\nOutput format: [{"id": "...", "tags": [...]}, ...]')
 
         try:
-            resp = llm_inst.call(system=CONCEPT_SYSTEM, user=prompt, max_tokens=1500)
+            # 1h TTL: concept extraction often runs across thousands of memories
+            # in one backfill, total wall time well over 5 minutes per batch.
+            resp = llm_inst.call(system=CONCEPT_SYSTEM, user=prompt,
+                                 max_tokens=1500, cache_ttl="1h")
             text = resp.text.strip()
             text = re.sub(r'^```(?:json)?\s*', '', text)
             text = re.sub(r'\s*```$', '', text)
@@ -244,7 +247,7 @@ def confirm_pairs(candidates: list, memories_dict: dict,
                   + "\n\n".join(prompt_parts))
 
         try:
-            resp = llm_inst.call(system="", user=prompt, max_tokens=200)
+            resp = llm_inst.call(system="", user=prompt, max_tokens=200, cache_ttl="1h")
             text = resp.text.strip()
             if text == "NONE":
                 continue

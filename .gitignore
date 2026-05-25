@@ -1,0 +1,20 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+.env
+
+# Local LLM config (contains API keys / endpoints)
+.anchor/
+anchor_config.yaml
+
+# Internal documentation — 小红书 / personal release notes (use RELEASE_NOTES_*.md
+# for the public-facing changelogs instead).
+XHS_*.md
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/

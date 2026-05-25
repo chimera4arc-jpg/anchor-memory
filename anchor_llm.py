@@ -91,27 +91,57 @@ class LLM:
         self.endpoint = endpoint
 
     def call(self, system: str, user: str, max_tokens: int = 1024,
-             temperature: float = 0.5) -> LLMResponse:
-        """Top-level call with spend tracking and cap enforcement."""
+             temperature: float = 0.5, cache_ttl: str = "5m") -> LLMResponse:
+        """Top-level call with spend tracking and cap enforcement.
+
+        Args:
+            cache_ttl: Provider-specific. For Anthropic: "5m" (default) or "1h".
+                Use "1h" for long-running background passes where the same
+                system prompt fires many times across more than 5 minutes —
+                dream pass, concept_link backfill, etc. 1h write is ~2x the
+                cost of 5m write, but read is the same cheap price; on any
+                pass running more than ~10 minutes, 1h wins.
+                Ignored by providers that auto-manage cache (OpenAI, Google).
+        """
         _check_daily_cap()
-        resp = self._call_raw(system, user, max_tokens, temperature)
+        resp = self._call_raw(system, user, max_tokens, temperature, cache_ttl)
         _record_spend(resp)
         return resp
 
     def _call_raw(self, system: str, user: str, max_tokens: int,
-                  temperature: float) -> LLMResponse:
+                  temperature: float, cache_ttl: str = "5m") -> LLMResponse:
         raise NotImplementedError
 
-    def _price(self, in_tok: int, out_tok: int) -> float:
+    def _price(self, in_tok: int, out_tok: int,
+               cache_read_tok: int = 0, cache_write_tok: int = 0,
+               cache_ttl: str = "5m") -> float:
+        """Estimate $ cost given token counts.
+
+        Anthropic pricing:
+        - input_no_cache: base price (in_tok already excludes cache_read/write)
+        - cache_read:     0.1x base
+        - cache_write_5m: 1.25x base
+        - cache_write_1h: 2x base
+
+        For other providers the cache_* fields are 0 (provider auto-managed).
+        """
         key = f"{self.provider}:{self.model}"
         rates = PRICES_PER_M.get(key, (0.0, 0.0))
-        return (in_tok * rates[0] + out_tok * rates[1]) / 1_000_000
+        in_rate, out_rate = rates
+        cw_mult = 2.0 if cache_ttl == "1h" else 1.25
+        cost = (
+            in_tok * in_rate
+            + out_tok * out_rate
+            + cache_read_tok * in_rate * 0.1
+            + cache_write_tok * in_rate * cw_mult
+        ) / 1_000_000
+        return cost
 
 
 class AnthropicLLM(LLM):
     provider = "anthropic"
 
-    def _call_raw(self, system, user, max_tokens, temperature):
+    def _call_raw(self, system, user, max_tokens, temperature, cache_ttl="5m"):
         try:
             import anthropic
         except ImportError as e:
@@ -119,19 +149,37 @@ class AnthropicLLM(LLM):
                 "anthropic SDK not installed. Run: pip install anthropic"
             ) from e
         client = anthropic.Anthropic(api_key=self.api_key or os.getenv("ANTHROPIC_API_KEY"))
+        # Wrap system as a cache_control block. Anthropic requires:
+        #   - prompt >= 1024 tokens to actually cache (smaller prompts pass
+        #     through transparently with no cache effect)
+        #   - same prompt fires within TTL to get a cache hit
+        # We always wrap; if the prompt is small the SDK silently no-ops the
+        # cache. This costs nothing extra to do unconditionally.
+        cache_block = {"type": "ephemeral"}
+        if cache_ttl == "1h":
+            cache_block["ttl"] = "1h"
+        system_blocks = [{
+            "type": "text",
+            "text": system,
+            "cache_control": cache_block,
+        }] if system else []
         resp = client.messages.create(
             model=self.model,
             max_tokens=max_tokens,
             temperature=temperature,
-            system=system,
+            system=system_blocks,
             messages=[{"role": "user", "content": user}],
         )
         text = resp.content[0].text if resp.content else ""
         in_tok = resp.usage.input_tokens
         out_tok = resp.usage.output_tokens
+        # Capture cache hits/writes for spend tracking (Anthropic-only fields)
+        usage = resp.usage
+        cache_read = getattr(usage, "cache_read_input_tokens", 0) or 0
+        cache_write = getattr(usage, "cache_creation_input_tokens", 0) or 0
         return LLMResponse(
             text=text, input_tokens=in_tok, output_tokens=out_tok,
-            cost_usd=self._price(in_tok, out_tok),
+            cost_usd=self._price(in_tok, out_tok, cache_read, cache_write, cache_ttl),
             provider=self.provider, model=self.model,
         )
 
@@ -140,7 +188,9 @@ class OpenAILLM(LLM):
     """OpenAI native (gpt-5-nano, gpt-5, etc.)."""
     provider = "openai"
 
-    def _call_raw(self, system, user, max_tokens, temperature):
+    def _call_raw(self, system, user, max_tokens, temperature, cache_ttl="5m"):
+        # OpenAI auto-caches prompts >1024 tokens; no explicit cache_control
+        # needed. cache_ttl arg is accepted for interface uniformity, ignored.
         try:
             from openai import OpenAI
         except ImportError as e:
@@ -170,7 +220,8 @@ class OpenAILLM(LLM):
 class GoogleLLM(LLM):
     provider = "google"
 
-    def _call_raw(self, system, user, max_tokens, temperature):
+    def _call_raw(self, system, user, max_tokens, temperature, cache_ttl="5m"):
+        # Gemini has implicit context caching; cache_ttl ignored.
         try:
             import google.generativeai as genai
         except ImportError as e:
@@ -208,7 +259,9 @@ class OpenAICompatLLM(LLM):
     """
     provider = "openai-compat"
 
-    def _call_raw(self, system, user, max_tokens, temperature):
+    def _call_raw(self, system, user, max_tokens, temperature, cache_ttl="5m"):
+        # DeepSeek / GLM caches automatically; Ollama / LM Studio have no
+        # remote billing. cache_ttl accepted for interface uniformity, ignored.
         try:
             from openai import OpenAI
         except ImportError as e:
@@ -253,7 +306,8 @@ class CallableLLM(LLM):
         self.api_key = None
         self.endpoint = None
 
-    def _call_raw(self, system, user, max_tokens, temperature):
+    def _call_raw(self, system, user, max_tokens, temperature, cache_ttl="5m"):
+        # User-supplied function manages its own caching; cache_ttl ignored.
         text = self.fn(system, user, max_tokens, temperature)
         return LLMResponse(text=text, provider=self.provider, model=self.model)
 

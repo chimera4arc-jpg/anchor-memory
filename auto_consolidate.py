@@ -121,7 +121,9 @@ def _llm_confirm(candidates, memories_dict, llm=None):
                   "Output only YES pair numbers, comma-separated. If none, output NONE.\n\n"
                   + "\n\n".join(prompt_parts))
         try:
-            resp = llm_inst.call(system="", user=prompt, max_tokens=200)
+            # 1h TTL: consolidation walks every memory pair worth checking,
+            # typically a long batch within one daily run.
+            resp = llm_inst.call(system="", user=prompt, max_tokens=200, cache_ttl="1h")
             text = resp.text.strip()
             if text == "NONE":
                 continue
