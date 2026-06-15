@@ -1,10 +1,38 @@
 import json, os, sys
 from http.server import HTTPServer, BaseHTTPRequestHandler
+
+# Disable ChromaDB telemetry to prevent blocking network calls during init
+os.environ.setdefault("ANONYMIZED_TELEMETRY", "False")
+os.environ.setdefault("CHROMA_TELEMETRY", "False")
+
 sys.path.insert(0, os.path.dirname(__file__))
+
+# Ensure stdout is unbuffered so logs appear immediately
+if hasattr(sys.stdout, 'reconfigure'):
+    try:
+        sys.stdout.reconfigure(line_buffering=True)
+    except Exception:
+        pass
+
 from anchor_mcp import create_server
 
+# Re-enable line buffering after anchor_mcp replaces sys.stdout with a fully-buffered wrapper
+if hasattr(sys.stdout, 'reconfigure'):
+    try:
+        sys.stdout.reconfigure(line_buffering=True)
+    except Exception:
+        pass
+
 db_path = os.environ.get("DB_PATH", "/data/anchor_memory")
-tools, handle_tool, mem = create_server(db_path=db_path)
+try:
+    print("Initializing Anchor Memory...", flush=True)
+    tools, handle_tool, mem = create_server(db_path=db_path)
+    print("Anchor Memory initialized successfully", flush=True)
+except Exception as e:
+    print(f"FATAL: Failed to initialize Anchor Memory: {e}", file=sys.stderr, flush=True)
+    import traceback
+    traceback.print_exc(file=sys.stderr)
+    sys.exit(1)
 
 class MCPHandler(BaseHTTPRequestHandler):
     def _send(self, data, status=200):
